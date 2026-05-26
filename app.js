@@ -13,6 +13,14 @@
     template: "1",
   };
 
+  // Bake bookkeeping: each new file pick gets a fresh id so a stale
+  // bake from a previous pick never re-enables the button or overwrites
+  // the current photo.
+  let bakeId = 0;
+  let imageBusy = false;
+  let downloadInFlight = false;
+  let originalDownloadHTML = "";
+
   // --------------------------- DOM Refs ---------------------------
   const $name = document.getElementById("nameInput");
   const $message = document.getElementById("messageInput");
@@ -373,33 +381,73 @@
     }
   }
 
+  function setImageBusy(busy) {
+    imageBusy = busy;
+    refreshDownloadButton();
+  }
+
+  /**
+   * The download button must be locked while:
+   *   • a file is being baked (so we never composite a half-decoded photo)
+   *   • a download is already in flight (so we don't double-trigger)
+   */
+  function refreshDownloadButton() {
+    if (!$downloadBtn) return;
+    if (!originalDownloadHTML) originalDownloadHTML = $downloadBtn.innerHTML;
+
+    if (downloadInFlight) {
+      $downloadBtn.disabled = true;
+      $downloadBtn.innerHTML = `<span class="spinner" aria-hidden="true"></span> جاري التحضير…`;
+      return;
+    }
+    if (imageBusy) {
+      $downloadBtn.disabled = true;
+      $downloadBtn.innerHTML = `<span class="spinner" aria-hidden="true"></span> جاري تحضير الصورة…`;
+      return;
+    }
+    $downloadBtn.disabled = false;
+    $downloadBtn.innerHTML = originalDownloadHTML;
+  }
+
   function handleFile(file) {
     if (!file || !file.type.startsWith("image/")) return;
+
+    const myBakeId = ++bakeId;
+    setImageBusy(true);
+
     const reader = new FileReader();
+    reader.onerror = () => {
+      if (myBakeId === bakeId) setImageBusy(false);
+    };
     reader.onload = (ev) => {
+      // A newer file pick already started? Drop this one on the floor.
+      if (myBakeId !== bakeId) return;
+
       const rawDataURL = ev.target.result;
 
-      // Show form preview immediately.
       $filePreviewImg.src = rawDataURL;
       $filePreview.hidden = false;
       const content = $fileDrop.querySelector(".file-drop-content");
       if (content) content.style.display = "none";
 
-      // CRITICAL: commit the photo to state.image and re-render BEFORE the
-      // bake completes. This way if the user taps Download right away,
-      // we always have a real photo to composite — never null.
+      // Show the photo in the live card preview right away (UX feels instant)
+      // but keep the download button locked until the bake settles.
       state.image = rawDataURL;
       renderCard();
 
-      // Bake in background: produces a smaller, EXIF-corrected JPEG that
-      // replaces the raw data URL once ready. If the user already
-      // downloaded by then, we still got the correct (un-baked) photo.
-      bakeImageDataURL(rawDataURL).then((baked) => {
-        if (state.image === rawDataURL && baked !== rawDataURL) {
-          state.image = baked;
-          renderCard();
-        }
-      });
+      bakeImageDataURL(rawDataURL)
+        .then((baked) => {
+          if (myBakeId !== bakeId) return; // superseded by a newer pick
+          if (baked && baked !== rawDataURL) {
+            state.image = baked;
+            renderCard();
+          }
+          setImageBusy(false);
+        })
+        .catch((err) => {
+          console.warn("bake failed:", err);
+          if (myBakeId === bakeId) setImageBusy(false);
+        });
     };
     reader.readAsDataURL(file);
   }
@@ -639,9 +687,16 @@
       alert("تعذّر تحميل أداة التصدير. تأكد من اتصالك بالإنترنت.");
       return;
     }
-    $downloadBtn.disabled = true;
-    const originalLabel = $downloadBtn.innerHTML;
-    $downloadBtn.innerHTML = "جاري التحضير…";
+    // Hard guard — should never trigger because the button is disabled
+    // while either of these is true, but defensively block re-entry anyway.
+    if (imageBusy) {
+      alert("الصورة لسه بتتحمل، انتظر شوية بعدها أعد المحاولة.");
+      return;
+    }
+    if (downloadInFlight) return;
+
+    downloadInFlight = true;
+    refreshDownloadButton();
 
     const bgEl = $card.querySelector(".user-image-bg");
     const originalBgInline = bgEl ? bgEl.getAttribute("style") : null;
@@ -712,13 +767,14 @@
         if (originalBgInline !== null) bgEl.setAttribute("style", originalBgInline);
         else bgEl.removeAttribute("style");
       }
-      $downloadBtn.disabled = false;
-      $downloadBtn.innerHTML = originalLabel;
+      downloadInFlight = false;
+      refreshDownloadButton();
     }
   }
 
   $downloadBtn.addEventListener("click", downloadCard);
 
   // --------------------------- Init ---------------------------
+  if ($downloadBtn) originalDownloadHTML = $downloadBtn.innerHTML;
   renderCard();
 })();

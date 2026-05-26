@@ -218,7 +218,28 @@ input[type="text"]:focus {
 }
 .primary-btn:hover { transform: translateY(-1px); box-shadow: 0 10px 22px -6px rgba(140, 106, 16, 0.6); }
 .primary-btn:active { transform: translateY(0); }
-.primary-btn:disabled { opacity: 0.6; cursor: progress; }
+.primary-btn:disabled {
+  opacity: 0.72;
+  cursor: not-allowed;
+  transform: none;
+  box-shadow: 0 4px 10px -4px rgba(140, 106, 16, 0.35);
+}
+.primary-btn:disabled:hover { transform: none; }
+
+.spinner {
+  display: inline-block;
+  width: 16px;
+  height: 16px;
+  border: 2px solid rgba(255, 248, 231, 0.35);
+  border-top-color: #fff8e7;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  vertical-align: -3px;
+  margin-left: 6px;
+}
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
 
 /* -------------------------- Preview Panel -------------------------- */
 .preview-panel {
