@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>بطاقات تهنئة عيد الأضحى المبارك</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link
+    href="https://fonts.googleapis.com/css2?family=Amiri:wght@400;700&family=Aref+Ruqaa:wght@400;700&family=Cairo:wght@300;400;600;700;900&family=Reem+Kufi:wght@400;500;600;700&family=Lateef:wght@400;700&display=swap"
+    rel="stylesheet"
+  />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <main class="container hero">
+    <section class="form-panel" aria-label="نموذج إنشاء البطاقة">
+      <div class="panel-card">
+        <div class="panel-heading">
+          <h1 class="brand-title">
+            <span class="title-deco">۞</span>
+            بطاقات عيد الأضحى
+            <span class="title-deco">۞</span>
+          </h1>
+          <p class="brand-sub">صمّم بطاقتك بلمسة عربية إسلامية أصيلة</p>
+        </div>
+
+        <div class="field">
+          <label for="nameInput">اسمك</label>
+          <input
+            type="text"
+            id="nameInput"
+            placeholder="اكتب اسمك كما تريد أن يظهر في البطاقة"
+            maxlength="40"
+            value="فلان الفلاني"
+          />
+          <p class="field-hint">سيظهر اسمك كمُرسل التهنئة لمن تشاركه البطاقة.</p>
+        </div>
+
+        <div class="field">
+          <label for="messageInput">عبارة إضافية (اختياري)</label>
+          <input
+            type="text"
+            id="messageInput"
+            placeholder="مثال: تقبّل الله منا ومنكم صالح الأعمال"
+            maxlength="80"
+            value="تقبّل الله منا ومنكم صالح الأعمال"
+          />
+        </div>
+
+        <div class="field">
+          <label for="imageInput">صورتك أو شعارك (اختياري)</label>
+          <div class="file-drop" id="fileDrop">
+            <input type="file" id="imageInput" accept="image/*" />
+            <div class="file-drop-content">
+              <svg viewBox="0 0 24 24" width="36" height="36" fill="none" stroke="currentColor" stroke-width="1.8">
+                <path d="M12 16V4M12 4l-4 4M12 4l4 4" stroke-linecap="round" stroke-linejoin="round"/>
+                <path d="M20 16v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+              <span class="file-drop-title">اسحب صورتك هنا أو اضغط للاختيار</span>
+              <span class="file-drop-hint">PNG / JPG — يفضّل صورة مربّعة</span>
+            </div>
+            <div class="file-preview" id="filePreview" hidden>
+              <img id="filePreviewImg" alt="" />
+            </div>
+          </div>
+        </div>
+
+        <div class="field">
+          <label>اختر التصميم</label>
+          <div class="template-grid" id="templateGrid" role="radiogroup" aria-label="القوالب">
+            <button class="template-thumb is-active" data-template="1" role="radio" aria-checked="true">
+              <div class="thumb-preview thumb-1">
+                <span class="thumb-sheep">🐑</span>
+              </div>
+              <span class="thumb-label">الذهبي الكلاسيكي</span>
+            </button>
+            <button class="template-thumb" data-template="2" role="radio" aria-checked="false">
+              <div class="thumb-preview thumb-2">
+                <span class="thumb-sheep">🐑</span>
+              </div>
+              <span class="thumb-label">الزمردي الأصيل</span>
+            </button>
+            <button class="template-thumb" data-template="3" role="radio" aria-checked="false">
+              <div class="thumb-preview thumb-3">
+                <span class="thumb-sheep">🐑</span>
+              </div>
+              <span class="thumb-label">الملكي الفاخر</span>
+            </button>
+            <button class="template-thumb" data-template="4" role="radio" aria-checked="false">
+              <div class="thumb-preview thumb-4">
+                <span class="thumb-sheep">🐑</span>
+              </div>
+              <span class="thumb-label">الفسيفساء الأندلسي</span>
+            </button>
+          </div>
+        </div>
+
+        <button class="primary-btn" id="downloadBtn">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M12 4v12M12 16l-4-4M12 16l4-4" stroke-linecap="round" stroke-linejoin="round"/>
+            <path d="M4 20h16" stroke-linecap="round"/>
+          </svg>
+          تنزيل البطاقة
+        </button>
+      </div>
+    </section>
+
+    <section class="preview-panel" aria-label="معاينة البطاقة">
+      <div class="card-stage">
+        <div class="card" id="cardPreview" data-template="1">
+          <!-- Card content is rendered dynamically via app.js -->
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <p>صُنع بحب لتهنئة الأهل والأحبة بعيد الأضحى المبارك 🌙</p>
+  </footer>
+
+  <script src="https://cdn.jsdelivr.net/npm/html-to-image@1.11.13/dist/html-to-image.min.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
