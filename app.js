@@ -270,6 +270,13 @@
       $filePreview.hidden = false;
       const content = $fileDrop.querySelector(".file-drop-content");
       if (content) content.style.display = "none";
+
+      // Pre-decode the image in the browser cache so the very first download
+      // already has the photo (no need for a second click).
+      const warm = new Image();
+      warm.src = state.image;
+      if (warm.decode) warm.decode().catch(() => {});
+
       renderCard();
     };
     reader.readAsDataURL(file);
@@ -389,6 +396,25 @@
       if (document.fonts && document.fonts.ready) {
         await document.fonts.ready;
       }
+
+      // Make sure every <img> inside the card is fully decoded BEFORE we ask
+      // html-to-image to clone the DOM. Otherwise on the first download right
+      // after a file pick, the cloned <img> serializes empty and the exported
+      // PNG comes out without the user's photo.
+      const imgs = Array.from($card.querySelectorAll("img"));
+      await Promise.all(
+        imgs.map(async (img) => {
+          if (img.decode) {
+            try { await img.decode(); } catch (_) { /* ignore */ }
+          } else if (!img.complete) {
+            await new Promise((res) => {
+              img.addEventListener("load", res, { once: true });
+              img.addEventListener("error", res, { once: true });
+            });
+          }
+        })
+      );
+
       const fontEmbedCSS = await buildEmbeddedFontCSS();
 
       const rect = $card.getBoundingClientRect();
