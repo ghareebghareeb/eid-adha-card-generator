@@ -21,14 +21,7 @@
 
 ```bash
 open index.html
-```
-
-أو شغّل خادم محلي بسيط (اختياري):
-
-```bash
-python3 -m http.server 8000
-# ثم افتح http://localhost:8000
-```
+``````
 
 ## البنية
 
