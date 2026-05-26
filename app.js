@@ -300,29 +300,63 @@
   });
 
   /**
+   * Decode an image (URL, data URL, or Blob) into something drawable on a
+   * canvas. Uses createImageBitmap with EXIF orientation handling when
+   * available — this is critical for iPhone Live Photos / camera photos
+   * which carry an orientation tag that <img> respects but drawImage()
+   * silently ignores.
+   */
+  async function decodeImage(src) {
+    if (typeof createImageBitmap === "function") {
+      try {
+        let blob;
+        if (src instanceof Blob) {
+          blob = src;
+        } else {
+          const resp = await fetch(src);
+          blob = await resp.blob();
+        }
+        return await createImageBitmap(blob, {
+          imageOrientation: "from-image",
+        });
+      } catch (e) {
+        console.warn("createImageBitmap failed, falling back to <img>:", e);
+      }
+    }
+
+    return await new Promise((resolve, reject) => {
+      const img = new Image();
+      img.crossOrigin = "anonymous";
+      img.onload = () => resolve(img);
+      img.onerror = (e) => reject(e);
+      img.src = src instanceof Blob ? URL.createObjectURL(src) : src;
+    });
+  }
+
+  function getDecodedSize(bitmap) {
+    return {
+      w: bitmap.width || bitmap.naturalWidth || 0,
+      h: bitmap.height || bitmap.naturalHeight || 0,
+    };
+  }
+
+  /**
    * Re-encode an arbitrary image data URL through a <canvas> so we get a
-   * clean, fully-decoded PNG data URL that html-to-image can embed without
-   * waiting on any async <img> load. Also caps the image at MAX_DIM so
-   * gigantic phone photos (4000+ px) don't bloat the exported SVG.
+   * clean, EXIF-corrected, size-capped JPEG that's guaranteed paintable.
    */
   async function bakeImageDataURL(srcDataURL) {
     const MAX_DIM = 1024;
-    const img = new Image();
-    img.crossOrigin = "anonymous";
-    img.src = srcDataURL;
+    let bitmap;
     try {
-      if (img.decode) await img.decode();
-      else
-        await new Promise((res, rej) => {
-          img.onload = res;
-          img.onerror = rej;
-        });
-    } catch (_) {
-      return srcDataURL; // best-effort fallback
+      bitmap = await decodeImage(srcDataURL);
+    } catch (e) {
+      console.warn("bake decode failed:", e);
+      return srcDataURL;
     }
 
-    let { naturalWidth: w, naturalHeight: h } = img;
+    const { w, h } = getDecodedSize(bitmap);
     if (!w || !h) return srcDataURL;
+
     const scale = Math.min(1, MAX_DIM / Math.max(w, h));
     const dw = Math.round(w * scale);
     const dh = Math.round(h * scale);
@@ -331,9 +365,9 @@
     canvas.width = dw;
     canvas.height = dh;
     const ctx = canvas.getContext("2d");
-    ctx.drawImage(img, 0, 0, dw, dh);
+    ctx.drawImage(bitmap, 0, 0, dw, dh);
     try {
-      return canvas.toDataURL("image/png");
+      return canvas.toDataURL("image/jpeg", 0.92);
     } catch (_) {
       return srcDataURL;
     }
@@ -342,22 +376,30 @@
   function handleFile(file) {
     if (!file || !file.type.startsWith("image/")) return;
     const reader = new FileReader();
-    reader.onload = async (ev) => {
+    reader.onload = (ev) => {
       const rawDataURL = ev.target.result;
 
-      // Show preview immediately with raw data so UX feels instant.
+      // Show form preview immediately.
       $filePreviewImg.src = rawDataURL;
       $filePreview.hidden = false;
       const content = $fileDrop.querySelector(".file-drop-content");
       if (content) content.style.display = "none";
 
-      // Re-encode through a canvas → guaranteed-decoded, size-capped PNG.
-      // This is the key fix for "first download has no photo": by the time
-      // renderCard() puts this into the card, it is a bitmap that html-to-image
-      // can embed synchronously, with no decode race inside foreignObject.
-      const baked = await bakeImageDataURL(rawDataURL);
-      state.image = baked;
+      // CRITICAL: commit the photo to state.image and re-render BEFORE the
+      // bake completes. This way if the user taps Download right away,
+      // we always have a real photo to composite — never null.
+      state.image = rawDataURL;
       renderCard();
+
+      // Bake in background: produces a smaller, EXIF-corrected JPEG that
+      // replaces the raw data URL once ready. If the user already
+      // downloaded by then, we still got the correct (un-baked) photo.
+      bakeImageDataURL(rawDataURL).then((baked) => {
+        if (state.image === rawDataURL && baked !== rawDataURL) {
+          state.image = baked;
+          renderCard();
+        }
+      });
     };
     reader.readAsDataURL(file);
   }
@@ -539,12 +581,22 @@
 
   /**
    * Composite the user's photo onto the canvas using direct Canvas API.
-   * This is the bulletproof fix for the "blank photo on first download"
-   * bug: we never rely on html-to-image to embed and time the user image,
-   * we paint it ourselves at the exact pixel position of the .user-image-wrap.
+   * Always called as a safety net — if html-to-image happened to render
+   * the background-image correctly we'll paint the same pixels again
+   * (no visual harm); if it didn't, we fill in the blank circle.
    */
-  async function paintUserPhotoOnCanvas(canvas, cardRect, wrap, photoDataURL) {
-    if (!wrap || !photoDataURL) return;
+  async function paintUserPhotoOnCanvas(canvas, cardRect, wrap, photoSrc) {
+    if (!wrap || !photoSrc) return;
+
+    let bitmap;
+    try {
+      bitmap = await decodeImage(photoSrc);
+    } catch (err) {
+      console.warn("Could not decode user image for compositing:", err);
+      return;
+    }
+    const { w: imgW, h: imgH } = getDecodedSize(bitmap);
+    if (!imgW || !imgH) return;
 
     const wrapRect = wrap.getBoundingClientRect();
     const cs = window.getComputedStyle(wrap);
@@ -560,21 +612,6 @@
         (wrapRect.height / 2 - borderW) * scaleY
       ) - 1; // tiny inset so we don't paint over the gold border
 
-    const img = new Image();
-    img.crossOrigin = "anonymous";
-    img.src = photoDataURL;
-    try {
-      if (img.decode) await img.decode();
-      else
-        await new Promise((res, rej) => {
-          img.onload = res;
-          img.onerror = rej;
-        });
-    } catch (err) {
-      console.warn("Could not decode user image for compositing:", err);
-      return;
-    }
-
     const ctx = canvas.getContext("2d");
     ctx.save();
     ctx.beginPath();
@@ -584,7 +621,7 @@
 
     // CSS "object-fit: cover" behaviour
     const diameter = radius * 2;
-    const imgRatio = img.naturalWidth / img.naturalHeight;
+    const imgRatio = imgW / imgH;
     let drawW, drawH;
     if (imgRatio > 1) {
       drawH = diameter;
@@ -593,7 +630,7 @@
       drawW = diameter;
       drawH = diameter / imgRatio;
     }
-    ctx.drawImage(img, cx - drawW / 2, cy - drawH / 2, drawW, drawH);
+    ctx.drawImage(bitmap, cx - drawW / 2, cy - drawH / 2, drawW, drawH);
     ctx.restore();
   }
 
