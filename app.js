@@ -255,8 +255,12 @@
     const name = escapeHTML(state.name || "");
     const message = escapeHTML(state.message || "");
 
+    // Use background-image (not <img>) so html-to-image inlines the bitmap
+    // into the cloned CSS BEFORE serialising the SVG. This avoids a known
+    // race in <foreignObject> where the cloned <img> hasn't finished
+    // decoding when the canvas is rasterised, producing an empty photo.
     const imageBlock = state.image
-      ? `<div class="user-image-wrap"><img src="${state.image}" alt="" crossorigin="anonymous" /></div>`
+      ? `<div class="user-image-wrap"><div class="user-image-bg" style="background-image: url('${state.image}')"></div></div>`
       : `<div class="user-image-wrap is-empty"><span class="placeholder-text">صورتك هنا</span></div>`;
 
     $card.setAttribute("data-template", state.template);
@@ -295,22 +299,64 @@
     renderCard();
   });
 
+  /**
+   * Re-encode an arbitrary image data URL through a <canvas> so we get a
+   * clean, fully-decoded PNG data URL that html-to-image can embed without
+   * waiting on any async <img> load. Also caps the image at MAX_DIM so
+   * gigantic phone photos (4000+ px) don't bloat the exported SVG.
+   */
+  async function bakeImageDataURL(srcDataURL) {
+    const MAX_DIM = 1024;
+    const img = new Image();
+    img.crossOrigin = "anonymous";
+    img.src = srcDataURL;
+    try {
+      if (img.decode) await img.decode();
+      else
+        await new Promise((res, rej) => {
+          img.onload = res;
+          img.onerror = rej;
+        });
+    } catch (_) {
+      return srcDataURL; // best-effort fallback
+    }
+
+    let { naturalWidth: w, naturalHeight: h } = img;
+    if (!w || !h) return srcDataURL;
+    const scale = Math.min(1, MAX_DIM / Math.max(w, h));
+    const dw = Math.round(w * scale);
+    const dh = Math.round(h * scale);
+
+    const canvas = document.createElement("canvas");
+    canvas.width = dw;
+    canvas.height = dh;
+    const ctx = canvas.getContext("2d");
+    ctx.drawImage(img, 0, 0, dw, dh);
+    try {
+      return canvas.toDataURL("image/png");
+    } catch (_) {
+      return srcDataURL;
+    }
+  }
+
   function handleFile(file) {
     if (!file || !file.type.startsWith("image/")) return;
     const reader = new FileReader();
-    reader.onload = (ev) => {
-      state.image = ev.target.result;
-      $filePreviewImg.src = state.image;
+    reader.onload = async (ev) => {
+      const rawDataURL = ev.target.result;
+
+      // Show preview immediately with raw data so UX feels instant.
+      $filePreviewImg.src = rawDataURL;
       $filePreview.hidden = false;
       const content = $fileDrop.querySelector(".file-drop-content");
       if (content) content.style.display = "none";
 
-      // Pre-decode the image in the browser cache so the very first download
-      // already has the photo (no need for a second click).
-      const warm = new Image();
-      warm.src = state.image;
-      if (warm.decode) warm.decode().catch(() => {});
-
+      // Re-encode through a canvas → guaranteed-decoded, size-capped PNG.
+      // This is the key fix for "first download has no photo": by the time
+      // renderCard() puts this into the card, it is a bitmap that html-to-image
+      // can embed synchronously, with no decode race inside foreignObject.
+      const baked = await bakeImageDataURL(rawDataURL);
+      state.image = baked;
       renderCard();
     };
     reader.readAsDataURL(file);
@@ -520,8 +566,7 @@
       }
 
       // Make sure every <img> inside the card is fully decoded BEFORE we ask
-      // html-to-image to clone the DOM. Otherwise on the first download right
-      // after a file pick, the cloned <img> serializes empty.
+      // html-to-image to clone the DOM.
       const imgs = Array.from($card.querySelectorAll("img"));
       await Promise.all(
         imgs.map(async (img) => {
@@ -548,12 +593,17 @@
         skipFonts: false,
       };
 
-      // Warm-up pass: forces the SVG foreignObject to materialize fonts and
-      // images so the high-DPI pass below is consistent.
-      try {
-        await htmlToImage.toPng($card, { ...renderOpts, pixelRatio: 1 });
-      } catch (warmErr) {
-        console.warn("Warm-up render failed (continuing):", warmErr);
+      // Two warm-up passes + an animation-frame wait. Each toPng() forces the
+      // browser to materialise the SVG foreignObject and decode any inline
+      // images. The second warm-up runs against a freshly-warmed cache, so by
+      // the time we capture the real high-DPI image everything is committed.
+      for (let i = 0; i < 2; i++) {
+        try {
+          await htmlToImage.toPng($card, { ...renderOpts, pixelRatio: 1 });
+        } catch (warmErr) {
+          console.warn(`Warm-up render ${i + 1} failed (continuing):`, warmErr);
+        }
+        await new Promise((r) => requestAnimationFrame(r));
       }
 
       const dataUrl = await htmlToImage.toPng($card, {

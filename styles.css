@@ -309,6 +309,13 @@ input[type="text"]:focus {
 .card .user-image-wrap img {
   width: 100%; height: 100%; object-fit: cover;
 }
+.card .user-image-bg {
+  width: 100%;
+  height: 100%;
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
+}
 .card .user-image-wrap.is-empty {
   background:
     repeating-linear-gradient(45deg,
