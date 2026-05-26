@@ -430,17 +430,6 @@
   }
 
   /**
-   * Detect WebViews / in-app browsers (WhatsApp, Instagram, Facebook, TikTok,
-   * LinkedIn) where the <a download> attribute is silently ignored. In that
-   * case we fall back to opening the image in a new tab so the user can
-   * long-press to save.
-   */
-  function isInAppBrowser() {
-    const ua = navigator.userAgent || "";
-    return /(FBAN|FBAV|Instagram|Line|MicroMessenger|WhatsApp|TikTok|Snapchat|Twitter|LinkedIn)/i.test(ua);
-  }
-
-  /**
    * Convert a data URL to a Blob so we can use object URLs which are more
    * reliable than huge data URLs (especially on Safari/iOS).
    */
@@ -464,6 +453,56 @@
     link.click();
     document.body.removeChild(link);
     setTimeout(() => URL.revokeObjectURL(url), 4000);
+  }
+
+  /**
+   * Best-effort "save" that adapts to the device:
+   *   1. Web Share API with files (iOS Safari, Android Chrome, and most
+   *      in-app browsers): opens the native share sheet so the user can
+   *      tap "Save Image" or share directly to WhatsApp / Instagram.
+   *   2. <a download> fallback for desktop browsers.
+   *   3. Final fallback: open the image in a new tab so the user can
+   *      long-press to save manually.
+   *
+   * Returns true if some delivery method was actually invoked.
+   */
+  async function shareOrDownload(blob, filename) {
+    const file = new File([blob], filename, { type: "image/png" });
+
+    if (
+      typeof navigator !== "undefined" &&
+      typeof navigator.canShare === "function" &&
+      navigator.canShare({ files: [file] }) &&
+      typeof navigator.share === "function"
+    ) {
+      try {
+        await navigator.share({
+          files: [file],
+          title: "بطاقة عيد الأضحى",
+          text: "عيد أضحى مبارك",
+        });
+        return true;
+      } catch (err) {
+        // User dismissed the share sheet — that's a successful flow.
+        if (err && err.name === "AbortError") return true;
+        console.warn("navigator.share failed, falling back:", err);
+      }
+    }
+
+    try {
+      triggerDownload(blob, filename);
+      return true;
+    } catch (err) {
+      console.warn("triggerDownload failed, opening in new tab:", err);
+    }
+
+    const url = URL.createObjectURL(blob);
+    const win = window.open(url, "_blank");
+    if (!win) {
+      alert("لحفظ الصورة: افتح المتصفح (سفاري/كروم) أولاً ثم أعد المحاولة، أو اضغط مطوّلاً على الصورة بعد فتحها.");
+    }
+    setTimeout(() => URL.revokeObjectURL(url), 30000);
+    return Boolean(win);
   }
 
   async function downloadCard() {
@@ -530,18 +569,7 @@
       const safeName = (state.name || "بطاقة").replace(/[\\/:*?"<>|]/g, "").trim() || "بطاقة";
       const filename = `بطاقة-عيد-الأضحى-${safeName}.png`;
 
-      if (isInAppBrowser()) {
-        // In-app browsers ignore <a download> silently. Open the PNG so the
-        // user can long-press → "Save Image".
-        const url = URL.createObjectURL(blob);
-        const win = window.open(url, "_blank");
-        if (!win) {
-          alert("لحفظ الصورة: افتح المتصفح (سفاري/كروم) أولاً ثم أعد المحاولة، أو اضغط مطوّلاً على الصورة بعد فتحها.");
-        }
-        setTimeout(() => URL.revokeObjectURL(url), 30000);
-      } else {
-        triggerDownload(blob, filename);
-      }
+      await shareOrDownload(blob, filename);
     } catch (err) {
       console.error("Download failed:", err);
       alert("حدث خطأ أثناء التصدير. حاول إعادة تحميل الصفحة ثم المحاولة من جديد.");
