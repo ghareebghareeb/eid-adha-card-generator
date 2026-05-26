@@ -475,20 +475,6 @@
     return cachedFontCSS;
   }
 
-  /**
-   * Convert a data URL to a Blob so we can use object URLs which are more
-   * reliable than huge data URLs (especially on Safari/iOS).
-   */
-  function dataUrlToBlob(dataUrl) {
-    const [header, base64] = dataUrl.split(",");
-    const mime = (header.match(/data:([^;]+)/) || [])[1] || "image/png";
-    const binary = atob(base64);
-    const len = binary.length;
-    const bytes = new Uint8Array(len);
-    for (let i = 0; i < len; i++) bytes[i] = binary.charCodeAt(i);
-    return new Blob([bytes], { type: mime });
-  }
-
   function triggerDownload(blob, filename) {
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
@@ -551,6 +537,66 @@
     return Boolean(win);
   }
 
+  /**
+   * Composite the user's photo onto the canvas using direct Canvas API.
+   * This is the bulletproof fix for the "blank photo on first download"
+   * bug: we never rely on html-to-image to embed and time the user image,
+   * we paint it ourselves at the exact pixel position of the .user-image-wrap.
+   */
+  async function paintUserPhotoOnCanvas(canvas, cardRect, wrap, photoDataURL) {
+    if (!wrap || !photoDataURL) return;
+
+    const wrapRect = wrap.getBoundingClientRect();
+    const cs = window.getComputedStyle(wrap);
+    const borderW = parseFloat(cs.borderTopWidth) || 0;
+
+    const scaleX = canvas.width / cardRect.width;
+    const scaleY = canvas.height / cardRect.height;
+    const cx = (wrapRect.left - cardRect.left + wrapRect.width / 2) * scaleX;
+    const cy = (wrapRect.top - cardRect.top + wrapRect.height / 2) * scaleY;
+    const radius =
+      Math.min(
+        (wrapRect.width / 2 - borderW) * scaleX,
+        (wrapRect.height / 2 - borderW) * scaleY
+      ) - 1; // tiny inset so we don't paint over the gold border
+
+    const img = new Image();
+    img.crossOrigin = "anonymous";
+    img.src = photoDataURL;
+    try {
+      if (img.decode) await img.decode();
+      else
+        await new Promise((res, rej) => {
+          img.onload = res;
+          img.onerror = rej;
+        });
+    } catch (err) {
+      console.warn("Could not decode user image for compositing:", err);
+      return;
+    }
+
+    const ctx = canvas.getContext("2d");
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+    ctx.closePath();
+    ctx.clip();
+
+    // CSS "object-fit: cover" behaviour
+    const diameter = radius * 2;
+    const imgRatio = img.naturalWidth / img.naturalHeight;
+    let drawW, drawH;
+    if (imgRatio > 1) {
+      drawH = diameter;
+      drawW = diameter * imgRatio;
+    } else {
+      drawW = diameter;
+      drawH = diameter / imgRatio;
+    }
+    ctx.drawImage(img, cx - drawW / 2, cy - drawH / 2, drawW, drawH);
+    ctx.restore();
+  }
+
   async function downloadCard() {
     if (typeof htmlToImage === "undefined") {
       alert("تعذّر تحميل أداة التصدير. تأكد من اتصالك بالإنترنت.");
@@ -560,63 +606,62 @@
     const originalLabel = $downloadBtn.innerHTML;
     $downloadBtn.innerHTML = "جاري التحضير…";
 
+    const bgEl = $card.querySelector(".user-image-bg");
+    const originalBgInline = bgEl ? bgEl.getAttribute("style") : null;
+
     try {
       if (document.fonts && document.fonts.ready) {
         await document.fonts.ready;
       }
 
-      // Make sure every <img> inside the card is fully decoded BEFORE we ask
-      // html-to-image to clone the DOM.
-      const imgs = Array.from($card.querySelectorAll("img"));
-      await Promise.all(
-        imgs.map(async (img) => {
-          if (img.decode) {
-            try { await img.decode(); } catch (_) { /* ignore */ }
-          } else if (!img.complete) {
-            await new Promise((res) => {
-              img.addEventListener("load", res, { once: true });
-              img.addEventListener("error", res, { once: true });
-            });
-          }
-        })
-      );
+      // Hide the CSS background-image during the html-to-image pass. We will
+      // composite the user photo ourselves on the resulting canvas, which
+      // bypasses the foreignObject decode race that left the photo blank
+      // on the first download.
+      if (bgEl) bgEl.style.backgroundImage = "none";
 
       const fontEmbedCSS = await buildEmbeddedFontCSS();
 
-      const rect = $card.getBoundingClientRect();
+      const cardRect = $card.getBoundingClientRect();
+      const wrap = $card.querySelector(".user-image-wrap");
+
       const renderOpts = {
-        width: rect.width,
-        height: rect.height,
+        width: cardRect.width,
+        height: cardRect.height,
         cacheBust: false,
         backgroundColor: null,
         fontEmbedCSS,
         skipFonts: false,
+        pixelRatio: 2,
       };
 
-      // Two warm-up passes + an animation-frame wait. Each toPng() forces the
-      // browser to materialise the SVG foreignObject and decode any inline
-      // images. The second warm-up runs against a freshly-warmed cache, so by
-      // the time we capture the real high-DPI image everything is committed.
-      for (let i = 0; i < 2; i++) {
-        try {
-          await htmlToImage.toPng($card, { ...renderOpts, pixelRatio: 1 });
-        } catch (warmErr) {
-          console.warn(`Warm-up render ${i + 1} failed (continuing):`, warmErr);
-        }
-        await new Promise((r) => requestAnimationFrame(r));
+      // One warm-up to make sure fonts/SVG patterns are materialised, then
+      // the real canvas pass.
+      try {
+        await htmlToImage.toPng($card, { ...renderOpts, pixelRatio: 1 });
+      } catch (warmErr) {
+        console.warn("Warm-up render failed (continuing):", warmErr);
+      }
+      await new Promise((r) => requestAnimationFrame(r));
+
+      const canvas = await htmlToImage.toCanvas($card, renderOpts);
+
+      if (!canvas || !canvas.width) {
+        throw new Error("html-to-image returned empty canvas");
       }
 
-      const dataUrl = await htmlToImage.toPng($card, {
-        ...renderOpts,
-        pixelRatio: 2,
+      // Now manually paint the user photo onto the canvas — deterministic.
+      await paintUserPhotoOnCanvas(canvas, cardRect, wrap, state.image);
+
+      const blob = await new Promise((resolve, reject) => {
+        canvas.toBlob(
+          (b) => (b ? resolve(b) : reject(new Error("toBlob returned null"))),
+          "image/png"
+        );
       });
 
-      if (!dataUrl || dataUrl.length < 1000) {
-        throw new Error("Empty image data returned");
-      }
-
-      const blob = dataUrlToBlob(dataUrl);
-      const safeName = (state.name || "بطاقة").replace(/[\\/:*?"<>|]/g, "").trim() || "بطاقة";
+      const safeName =
+        (state.name || "بطاقة").replace(/[\\/:*?"<>|]/g, "").trim() || "بطاقة";
       const filename = `بطاقة-عيد-الأضحى-${safeName}.png`;
 
       await shareOrDownload(blob, filename);
@@ -624,6 +669,12 @@
       console.error("Download failed:", err);
       alert("حدث خطأ أثناء التصدير. حاول إعادة تحميل الصفحة ثم المحاولة من جديد.");
     } finally {
+      // Restore the original inline background-image so the preview keeps
+      // showing the photo.
+      if (bgEl) {
+        if (originalBgInline !== null) bgEl.setAttribute("style", originalBgInline);
+        else bgEl.removeAttribute("style");
+      }
       $downloadBtn.disabled = false;
       $downloadBtn.innerHTML = originalLabel;
     }
