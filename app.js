@@ -217,6 +217,37 @@
       .replace(/'/g, "&#39;");
   }
 
+  /**
+   * Keep the user's name on a single line by shrinking font-size to fit
+   * the available width inside the card. Falls back to a tiny minimum
+   * size so very long names don't disappear.
+   */
+  function autoFitName() {
+    const nameEl = $card.querySelector(".name-text");
+    const fromBlock = $card.querySelector(".from-block");
+    const labelEl = $card.querySelector(".from-label");
+    const cardInner = $card.querySelector(".card-inner");
+    if (!nameEl || !fromBlock || !cardInner) return;
+
+    const MAX = 32;
+    const MIN = 14;
+
+    nameEl.style.fontSize = MAX + "px";
+    if (labelEl) labelEl.style.fontSize = "";
+
+    const cardInnerWidth = cardInner.clientWidth || $card.clientWidth * 0.76;
+    const maxRowWidth = cardInnerWidth * 0.96;
+
+    let size = MAX;
+    // Loop until from-block fits, OR we hit the minimum size.
+    while (size > MIN && fromBlock.scrollWidth > maxRowWidth) {
+      size -= 1;
+      nameEl.style.fontSize = size + "px";
+      // Shrink the label proportionally a bit too so the layout stays balanced.
+      if (labelEl) labelEl.style.fontSize = Math.max(13, 18 - (MAX - size) * 0.3) + "px";
+    }
+  }
+
   function renderCard() {
     const theme = THEMES[state.template] || THEMES["1"];
     const frameSVG = buildFrameSVG(theme);
@@ -247,6 +278,9 @@
         <p class="eid-subtitle">${message || "تقبّل الله منا ومنكم صالح الأعمال"}</p>
       </div>
     `;
+
+    // Wait for layout to settle, then auto-fit the name to keep it on one line.
+    requestAnimationFrame(autoFitName);
   }
 
   // --------------------------- Event Handlers ---------------------------
@@ -324,14 +358,28 @@
   let cachedFontCSS = null;
 
   /**
+   * Wrap a fetch with a hard timeout so a slow network can't hang the
+   * whole download flow.
+   */
+  function fetchWithTimeout(url, options = {}, timeoutMs = 6000) {
+    const controller = new AbortController();
+    const id = setTimeout(() => controller.abort(), timeoutMs);
+    return fetch(url, { ...options, signal: controller.signal }).finally(() =>
+      clearTimeout(id)
+    );
+  }
+
+  /**
    * Fetch the Google Fonts CSS used by the page and inline every woff2 file
    * as a base64 data URI. This bypasses CORS restrictions that prevent
-   * htmlToImage from reading cssRules of cross-origin stylesheets, so the
-   * exported PNG renders with the real Aref Ruqaa / Cairo / Amiri fonts
-   * instead of a system fallback.
+   * htmlToImage from reading cssRules of cross-origin stylesheets.
+   *
+   * If anything fails (offline, slow network, blocked CDN) we return an
+   * empty string — the exported PNG will then fall back to system fonts,
+   * but the user will still get a working download.
    */
   async function buildEmbeddedFontCSS() {
-    if (cachedFontCSS) return cachedFontCSS;
+    if (cachedFontCSS !== null) return cachedFontCSS;
 
     const FONTS_CSS_URL =
       "https://fonts.googleapis.com/css2" +
@@ -343,19 +391,17 @@
       "&display=swap";
 
     try {
-      const cssResp = await fetch(FONTS_CSS_URL, { mode: "cors" });
+      const cssResp = await fetchWithTimeout(FONTS_CSS_URL, { mode: "cors" }, 5000);
       if (!cssResp.ok) throw new Error("Failed to fetch fonts CSS");
       let cssText = await cssResp.text();
 
-      // Collect every font file URL referenced in the CSS.
       const urlMatches = [...cssText.matchAll(/url\((https?:[^)]+)\)/g)];
       const uniqueUrls = [...new Set(urlMatches.map((m) => m[1]))];
 
-      // Fetch each font file and convert to data URI in parallel.
       const replacements = await Promise.all(
         uniqueUrls.map(async (url) => {
           try {
-            const r = await fetch(url, { mode: "cors" });
+            const r = await fetchWithTimeout(url, { mode: "cors" }, 5000);
             const blob = await r.blob();
             const dataUri = await new Promise((resolve, reject) => {
               const reader = new FileReader();
@@ -383,6 +429,43 @@
     return cachedFontCSS;
   }
 
+  /**
+   * Detect WebViews / in-app browsers (WhatsApp, Instagram, Facebook, TikTok,
+   * LinkedIn) where the <a download> attribute is silently ignored. In that
+   * case we fall back to opening the image in a new tab so the user can
+   * long-press to save.
+   */
+  function isInAppBrowser() {
+    const ua = navigator.userAgent || "";
+    return /(FBAN|FBAV|Instagram|Line|MicroMessenger|WhatsApp|TikTok|Snapchat|Twitter|LinkedIn)/i.test(ua);
+  }
+
+  /**
+   * Convert a data URL to a Blob so we can use object URLs which are more
+   * reliable than huge data URLs (especially on Safari/iOS).
+   */
+  function dataUrlToBlob(dataUrl) {
+    const [header, base64] = dataUrl.split(",");
+    const mime = (header.match(/data:([^;]+)/) || [])[1] || "image/png";
+    const binary = atob(base64);
+    const len = binary.length;
+    const bytes = new Uint8Array(len);
+    for (let i = 0; i < len; i++) bytes[i] = binary.charCodeAt(i);
+    return new Blob([bytes], { type: mime });
+  }
+
+  function triggerDownload(blob, filename) {
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = filename;
+    link.rel = "noopener";
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    setTimeout(() => URL.revokeObjectURL(url), 4000);
+  }
+
   async function downloadCard() {
     if (typeof htmlToImage === "undefined") {
       alert("تعذّر تحميل أداة التصدير. تأكد من اتصالك بالإنترنت.");
@@ -399,8 +482,7 @@
 
       // Make sure every <img> inside the card is fully decoded BEFORE we ask
       // html-to-image to clone the DOM. Otherwise on the first download right
-      // after a file pick, the cloned <img> serializes empty and the exported
-      // PNG comes out without the user's photo.
+      // after a file pick, the cloned <img> serializes empty.
       const imgs = Array.from($card.querySelectorAll("img"));
       await Promise.all(
         imgs.map(async (img) => {
@@ -418,37 +500,51 @@
       const fontEmbedCSS = await buildEmbeddedFontCSS();
 
       const rect = $card.getBoundingClientRect();
-      // First pass primes the image cache (some browsers need a render before
-      // the SVG foreignObject reliably picks up the embedded font face URIs).
-      await htmlToImage.toPng($card, {
-        pixelRatio: 1,
+      const renderOpts = {
         width: rect.width,
         height: rect.height,
         cacheBust: false,
         backgroundColor: null,
         fontEmbedCSS,
         skipFonts: false,
-      });
+      };
+
+      // Warm-up pass: forces the SVG foreignObject to materialize fonts and
+      // images so the high-DPI pass below is consistent.
+      try {
+        await htmlToImage.toPng($card, { ...renderOpts, pixelRatio: 1 });
+      } catch (warmErr) {
+        console.warn("Warm-up render failed (continuing):", warmErr);
+      }
+
       const dataUrl = await htmlToImage.toPng($card, {
+        ...renderOpts,
         pixelRatio: 2,
-        width: rect.width,
-        height: rect.height,
-        cacheBust: false,
-        backgroundColor: null,
-        fontEmbedCSS,
-        skipFonts: false,
       });
 
-      const link = document.createElement("a");
+      if (!dataUrl || dataUrl.length < 1000) {
+        throw new Error("Empty image data returned");
+      }
+
+      const blob = dataUrlToBlob(dataUrl);
       const safeName = (state.name || "بطاقة").replace(/[\\/:*?"<>|]/g, "").trim() || "بطاقة";
-      link.download = `بطاقة-عيد-الأضحى-${safeName}.png`;
-      link.href = dataUrl;
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
+      const filename = `بطاقة-عيد-الأضحى-${safeName}.png`;
+
+      if (isInAppBrowser()) {
+        // In-app browsers ignore <a download> silently. Open the PNG so the
+        // user can long-press → "Save Image".
+        const url = URL.createObjectURL(blob);
+        const win = window.open(url, "_blank");
+        if (!win) {
+          alert("لحفظ الصورة: افتح المتصفح (سفاري/كروم) أولاً ثم أعد المحاولة، أو اضغط مطوّلاً على الصورة بعد فتحها.");
+        }
+        setTimeout(() => URL.revokeObjectURL(url), 30000);
+      } else {
+        triggerDownload(blob, filename);
+      }
     } catch (err) {
-      console.error(err);
-      alert("حدث خطأ أثناء التصدير، يرجى المحاولة مرة أخرى.");
+      console.error("Download failed:", err);
+      alert("حدث خطأ أثناء التصدير. حاول إعادة تحميل الصفحة ثم المحاولة من جديد.");
     } finally {
       $downloadBtn.disabled = false;
       $downloadBtn.innerHTML = originalLabel;
